@@ -2,137 +2,91 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import openai
+from supabase import create_client, Client
 
-# --- 1. CONFIGURATION & LOGIN ---
-st.set_page_config(page_title="AI Data Analyst Pro", layout="wide")
+# --- 1. INITIALIZE DATABASE & API ---
+# These will be pulled from your Streamlit Secrets
+try:
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    supabase: Client = create_client(url, key)
+except Exception as e:
+    st.error("Database connection missing. Check your Streamlit Secrets.")
 
-def check_password():
-    """Returns True if the user had the correct password."""
-    def password_entered():
-        if st.session_state["password"] == st.secrets["password"]:
-            st.session_state["password_correct"] = True
-            del st.session_state["password"] 
-        else:
-            st.session_state["password_correct"] = False
+# --- 2. SESSION STATE (To keep user logged in) ---
+if "user" not in st.session_state:
+    st.session_state.user = None
 
-    if "password_correct" not in st.session_state:
-        st.title("🔒 Company Data Portal")
-        st.text_input("Enter Access Password", type="password", on_change=password_entered, key="password")
-        return False
-    elif not st.session_state["password_correct"]:
-        st.title("🔒 Company Data Portal")
-        st.text_input("Enter Access Password", type="password", on_change=password_entered, key="password")
-        st.error("❌ Password incorrect")
-        return False
-    else:
-        return True
+# --- 3. AUTHENTICATION UI ---
+if st.session_state.user is None:
+    st.title("🔐 Company Data Portal")
+    auth_mode = st.tabs(["Login", "Register"])
 
-# --- 2. START OF THE APP ---
-if check_password():
-    
-    # Sidebar
+    # LOGIN TAB
+    with auth_mode[0]:
+        login_email = st.text_input("Email", key="login_email")
+        login_password = st.text_input("Password", type="password", key="login_pw")
+        if st.button("Login"):
+            try:
+                res = supabase.auth.sign_in_with_password({"email": login_email, "password": login_password})
+                st.session_state.user = res.user
+                st.success("Login successful!")
+                st.rerun()
+            except Exception as e:
+                st.error("Invalid email or password.")
+
+    # REGISTRATION TAB
+    with auth_mode[1]:
+        st.subheader("Create a New Account")
+        reg_email = st.text_input("Email", key="reg_email")
+        reg_password = st.text_input("Password", type="password", key="reg_pw")
+        if st.button("Register"):
+            try:
+                # This creates the user in Supabase
+                res = supabase.auth.sign_up({"email": reg_email, "password": reg_password})
+                st.success("Registration successful! You can now login.")
+                st.info("Note: Check your email for a confirmation link if required by your settings.")
+            except Exception as e:
+                st.error(f"Registration failed: {e}")
+
+# --- 4. THE MAIN APP (Only visible if logged in) ---
+else:
     with st.sidebar:
-        st.title("Settings")
+        st.write(f"Logged in as: **{st.session_state.user.email}**")
         if st.button("Logout"):
-            st.session_state["password_correct"] = False
+            supabase.auth.sign_out()
+            st.session_state.user = None
             st.rerun()
         
         st.divider()
-        st.header("Upload Center")
-        uploaded_file = st.file_uploader("Choose CSV or Excel", type=["csv", "xlsx"])
-        
-        st.divider()
-        # Optional: Allow user to override API key if not in secrets
-        api_key_input = st.text_input("OpenAI API Key (optional)", type="password")
-        final_api_key = api_key_input if api_key_input else st.secrets.get("OPENAI_API_KEY", "")
+        uploaded_file = st.file_uploader("Upload Business Data", type=["csv", "xlsx"])
 
     st.title("📊 AI Dataset Analysis Dashboard")
-    st.markdown("Automated insights and professional visualizations for your business data.")
 
     if uploaded_file:
-        # Load Data
-        try:
-            if uploaded_file.name.endswith('.csv'):
-                df = pd.read_csv(uploaded_file)
-            else:
-                df = pd.read_excel(uploaded_file)
+        df = pd.read_csv(uploaded_file) if uploaded_file.name.endswith('.csv') else pd.read_excel(uploaded_file)
+        
+        tab1, tab2, tab3 = st.tabs(["Overview", "Visualization", "AI Assistant"])
+        
+        with tab1:
+            st.dataframe(df.head())
+            st.metric("Total Rows", len(df))
             
-            # --- TABS ---
-            tab1, tab2, tab3, tab4 = st.tabs(["📋 Data Overview", "🛠️ Cleaning", "📈 Charts", "🤖 AI Analyst"])
-
-            # TAB 1: OVERVIEW
-            with tab1:
-                st.subheader("Data Summary")
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Rows", df.shape[0])
-                col2.metric("Columns", df.shape[1])
-                col3.metric("Empty Cells", df.isna().sum().sum())
-                
-                st.dataframe(df.head(10), use_container_width=True)
-                st.write("### Descriptive Statistics")
-                st.write(df.describe())
-
-            # TAB 2: CLEANING
-            with tab2:
-                st.subheader("Data Processing")
-                if st.button("Remove Duplicates & Fill Missing Values"):
-                    df = df.drop_duplicates()
-                    # Fill numeric with mean, objects with "Unknown"
-                    for col in df.columns:
-                        if df[col].dtype == "object":
-                            df[col] = df[col].fillna("Unknown")
-                        else:
-                            df[col] = df[col].fillna(df[col].mean())
-                    st.success("Data Cleaned Successfully!")
-                    st.dataframe(df.head(5))
-
-            # TAB 3: CHARTS
-            with tab3:
-                st.subheader("Visual Analysis")
-                cols = df.columns.tolist()
-                c1, c2, c3 = st.columns(3)
-                chart_type = c1.selectbox("Type", ["Bar", "Line", "Scatter", "Histogram"])
-                x_axis = c2.selectbox("X-Axis", cols)
-                y_axis = c3.selectbox("Y-Axis", cols)
-
-                if chart_type == "Bar":
-                    fig = px.bar(df, x=x_axis, y=y_axis, color_discrete_sequence=['#00CC96'])
-                elif chart_type == "Line":
-                    fig = px.line(df, x=x_axis, y=y_axis)
-                elif chart_type == "Scatter":
-                    fig = px.scatter(df, x=x_axis, y=y_axis)
-                else:
-                    fig = px.histogram(df, x=x_axis)
-                
-                st.plotly_chart(fig, use_container_width=True)
-
-            # TAB 4: AI ANALYST
-            with tab4:
-                st.subheader("Ask the AI Assistant")
-                user_question = st.text_input("Ask a question about your data (e.g., 'What are the top 3 trends?')")
-                
-                if user_question:
-                    if not final_api_key:
-                        st.error("Please provide an OpenAI API Key to use this feature.")
-                    else:
-                        try:
-                            openai.api_key = final_api_key
-                            # Send column names and stats summary to save tokens/cost
-                            data_context = f"Columns: {list(df.columns)}. Summary: {df.describe().to_dict()}"
-                            
-                            response = openai.ChatCompletion.create(
-                                model="gpt-3.5-turbo",
-                                messages=[
-                                    {"role": "system", "content": "You are a professional business data analyst."},
-                                    {"role": "user", "content": f"Based on this data context: {data_context}. Answer this: {user_question}"}
-                                ]
-                            )
-                            st.info("### AI Analysis:")
-                            st.write(response.choices[0].message.content)
-                        except Exception as e:
-                            st.error(f"AI Error: {e}")
-
-        except Exception as e:
-            st.error(f"Error loading file: {e}")
+        with tab2:
+            cols = df.columns.tolist()
+            x = st.selectbox("Select X Axis", cols)
+            y = st.selectbox("Select Y Axis", cols)
+            st.plotly_chart(px.bar(df, x=x, y=y))
+            
+        with tab3:
+            user_q = st.text_input("Ask AI about this data")
+            if user_q:
+                openai.api_key = st.secrets["OPENAI_API_KEY"]
+                st.info("AI is analyzing...")
+                response = openai.ChatCompletion.create(
+                    model="gpt-3.5-turbo",
+                    messages=[{"role": "user", "content": f"Columns: {df.columns.tolist()}. Question: {user_q}"}]
+                )
+                st.write(response.choices[0].message.content)
     else:
-        st.info("💡 Please upload a CSV or Excel file via the sidebar to begin.")
+        st.info("Welcome! Please upload a file to start.")
